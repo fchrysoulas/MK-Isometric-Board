@@ -7,6 +7,17 @@ export const CLOSE_DISTANCE = 5;
 export const NEAR_DISTANCE = 30;
 export const MIN_TILT = 5;
 export const MAX_TILT = 85;
+export const MIN_TOP_WIDTH = 20;
+export const MAX_TOP_WIDTH = 90;
+
+export function normalizeGridShape(value) {
+  return value === "trapezoid" ? "trapezoid" : "diamond";
+}
+
+export function normalizeTopWidth(value) {
+  const number = typeof value === "number" || (typeof value === "string" && value.trim()) ? Number(value) : NaN;
+  return Number.isFinite(number) ? Math.max(MIN_TOP_WIDTH, Math.min(MAX_TOP_WIDTH, Math.round(number))) : 50;
+}
 
 export function normalizeTilt(value) {
   if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return null;
@@ -46,6 +57,8 @@ export function normalizeScale(value) {
 export function createLayout(scene, rectangle, overrides = {}) {
   const settings = { ...scene?.getFlag?.("mk-isometric-board", "isometricBoard"), ...overrides };
   const size = normalizeBoardSize(settings.boardSize);
+  const gridShape = normalizeGridShape(settings.gridShape);
+  const topWidth = normalizeTopWidth(settings.topWidth);
   const rect = rectangle ?? scene?.getDimensions?.()?.sceneRect ?? { x: 0, y: 0, width: scene?.width, height: scene?.height };
   const width = positiveDimension(rect.width, BOARD_SIZE * 200);
   const height = positiveDimension(rect.height, BOARD_SIZE * 100);
@@ -62,14 +75,17 @@ export function createLayout(scene, rectangle, overrides = {}) {
   const cos = clean(Math.cos(radians));
   const sin = clean(Math.sin(radians));
   const ratio = tilt === null ? height / width : Math.tan(tilt * Math.PI / 180);
-  const fittedWidth = Math.min(width / (size * Math.max(Math.abs(cos), ratio * Math.abs(sin))),
-    height / (size * Math.max(Math.abs(sin), ratio * Math.abs(cos))));
+  const spanX = gridShape === "trapezoid" ? Math.abs(cos) + ratio * Math.abs(sin)
+    : Math.max(Math.abs(cos), ratio * Math.abs(sin));
+  const spanY = gridShape === "trapezoid" ? Math.abs(sin) + ratio * Math.abs(cos)
+    : Math.max(Math.abs(sin), ratio * Math.abs(cos));
+  const fittedWidth = Math.min(width / (size * spanX), height / (size * spanY));
   const cellWidth = scaleX * (tilt === null && rotation === 0 ? width / size : fittedWidth);
   const cellHeight = scaleY * (tilt === null && rotation === 0 ? height / size : fittedWidth * ratio);
   const centerX = (Number(rect.x) || 0) + width / 2 + offsetX;
   const centerY = top + height / 2;
   return {
-    size, offsetX, offsetY, scaleX, scaleY,
+    size, gridShape, topWidth, offsetX, offsetY, scaleX, scaleY,
     centerX, centerY, cos, sin, rotation, autoTilt: tilt === null,
     tilt: tilt ?? Math.atan(ratio) * 180 / Math.PI,
     originX: centerX,
@@ -85,7 +101,11 @@ export function readLayout(scene, rectangle, overrides) {
 }
 
 export function project(layout, column, row) {
-  const point = {
+  const taper = layout.topWidth / 100 + (1 - layout.topWidth / 100) * row / layout.size;
+  const point = layout.gridShape === "trapezoid" ? {
+    x: layout.centerX + (column - layout.size / 2) * layout.cellWidth * taper,
+    y: layout.originY + row * layout.cellHeight
+  } : {
     x: layout.originX + (column - row) * layout.cellWidth / 2,
     y: layout.originY + (column + row) * layout.cellHeight / 2
   };
@@ -107,6 +127,12 @@ export function unproject(layout, point) {
     const y = point.y - layout.centerY;
     point = { x: layout.centerX + x * layout.cos + y * layout.sin,
       y: layout.centerY - x * layout.sin + y * layout.cos };
+  }
+  if (layout.gridShape === "trapezoid") {
+    const row = (point.y - layout.originY) / layout.cellHeight;
+    const taper = layout.topWidth / 100 + (1 - layout.topWidth / 100) * row / layout.size;
+    if (taper <= 0) return null;
+    return { column: (point.x - layout.centerX) / (layout.cellWidth * taper) + layout.size / 2, row };
   }
   const x = (point.x - layout.originX) / (layout.cellWidth / 2);
   const y = (point.y - layout.originY) / (layout.cellHeight / 2);
@@ -157,6 +183,9 @@ function footprintAnchorOffset(layout, size) {
 }
 
 export function footprintAnchor(layout, cell, size = cell?.size ?? 1) {
+  if (layout.gridShape === "trapezoid") {
+    return project(layout, cell.column + size / 2, cell.row + size / 2 + (size === 2 ? 0.5 : 0));
+  }
   const center = footprintCenter(layout, cell, size);
   const offset = footprintAnchorOffset(layout, size);
   return { x: center.x + offset.x, y: center.y + offset.y };
@@ -171,16 +200,19 @@ export function footprintDistance(from, to) {
 }
 
 function footprintAtPoint(layout, point, size) {
-  const offset = footprintAnchorOffset(layout, size);
+  const trapezoid = layout.gridShape === "trapezoid";
+  const offset = trapezoid ? { x: 0, y: 0 } : footprintAnchorOffset(layout, size);
   const coordinates = unproject(layout, { x: point?.x - offset.x, y: point?.y - offset.y });
   if (!coordinates) return null;
-  // Old centered Large tokens lie on a placement boundary. Ignore subpixel
-  // rounding there so integer TokenDocument coordinates keep the same cells.
-  const tolerance = size === 2 ? 0.5 * (Math.abs(layout.cos ?? 1) + Math.abs(layout.sin ?? 0))
-    * (1 / layout.cellWidth + 1 / layout.cellHeight) + 1e-8 : 0;
+  // Old centered Large tokens lie on a placement boundary. Allow their pixel
+  // rounding error only while it cannot capture a rounded current anchor,
+  // which lies half a cell away. Narrow cells can make these margins overlap.
+  const roundingError = 0.5 * (Math.abs(layout.cos ?? 1) + Math.abs(layout.sin ?? 0))
+    * (1 / layout.cellWidth + 1 / layout.cellHeight);
+  const tolerance = size === 2 && !trapezoid ? Math.max(0, Math.min(roundingError + 1e-8, 0.5 - roundingError - 1e-8)) : 0;
   const index = value => Math.floor(Math.abs(value - Math.round(value)) <= tolerance ? Math.round(value) : value) || 0;
   return { column: index(coordinates.column - (size - 1) / 2),
-    row: index(coordinates.row - (size - 1) / 2), size };
+    row: index(coordinates.row - (size - 1) / 2 - (trapezoid && size === 2 ? 0.5 : 0)), size };
 }
 
 export function pointToTokenCell(document, layout, point, dimensions = {}) {

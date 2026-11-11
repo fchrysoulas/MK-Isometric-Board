@@ -90,6 +90,7 @@
 
 #mk-isometric-board-hud .mk-isometric-board-opacity,
 #mk-isometric-board-hud .mk-isometric-board-size,
+#mk-isometric-board-hud .mk-isometric-board-shape,
 #mk-isometric-board-hud .mk-isometric-board-view,
 #mk-isometric-board-hud .mk-isometric-board-color {
   display: grid;
@@ -114,6 +115,19 @@
 }
 
 #mk-isometric-board-hud .mk-isometric-board-view label { margin: 0; }
+
+#mk-isometric-board-hud .mk-isometric-board-shape label { margin: 0; }
+
+#mk-isometric-board-hud .mk-isometric-board-shape select {
+  grid-column: 2 / -1;
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid #82745b;
+  background: #303844;
+  color: #ede5d6;
+  font-size: 12px;
+}
 
 #mk-isometric-board-hud .mk-isometric-board-position {
   display: grid;
@@ -208,3 +222,5 @@ canvas.mk-isometric-board-moving { cursor: crosshair; }
 canvas.mk-isometric-board-positioning { cursor: grab; }
 canvas.mk-isometric-board-position-dragging { cursor: grabbing; }
 canvas.mk-isometric-board-resizing { cursor: var(--mk-isometric-board-resize-cursor, nwse-resize); }
+canvas.mk-isometric-board-rotating { cursor: grab; }
+canvas.mk-isometric-board-rotation-dragging { cursor: grabbing; }

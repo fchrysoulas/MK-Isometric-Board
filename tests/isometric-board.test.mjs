@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
-  BOARD_SIZE, MIN_BOARD_SIZE, MAX_BOARD_SIZE, FEET_PER_CELL, createLayout, readLayout, project, cellCenter, pointToCell,
+  BOARD_SIZE, MIN_BOARD_SIZE, MAX_BOARD_SIZE, FEET_PER_CELL, createLayout, readLayout, project, unproject, cellCenter, pointToCell,
   cellDistance, rangeBand, tokenCell, tokenPosition, tokenBase, tokenTop, measureBasePath,
   normalizeBoardSize, readBoardSize, validCell, tokenFootprintSize, tokenFootprint, footprintCells,
-  footprintCenter, footprintAnchor, footprintDistance, validFootprint, pointToTokenCell, normalizeTilt, normalizeRotation, normalizeOffset, normalizeScale
+  footprintCenter, footprintAnchor, footprintDistance, validFootprint, pointToTokenCell, normalizeTilt, normalizeRotation, normalizeOffset, normalizeScale,
+  normalizeGridShape, normalizeTopWidth
 } from "../scripts/isometric-board/geometry.js";
 import { IsometricBoardOverlay, registerIsometricBoard } from "../scripts/isometric-board/isometric-board.js";
 
@@ -111,6 +112,7 @@ function harness({ gm = true, enabled = true, paused = false, opacity = 20, grid
     clear() {
       this.polygons = 0; this.polygonPoints = []; this.lineAlphas = []; this.fillAlphas = [];
       this.lineColors = []; this.fillColors = []; this.starts = []; this.ends = [];
+      this.circles = [];
     }
     lineStyle(_width, color, alpha) { this.lineAlphas.push(alpha); this.lineColors.push(color); }
     beginFill(color, alpha) { this.fillAlphas.push(alpha); this.fillColors.push(color); }
@@ -118,6 +120,7 @@ function harness({ gm = true, enabled = true, paused = false, opacity = 20, grid
     moveTo(x, y) { this.starts.push({ x, y }); }
     lineTo(x, y) { this.ends.push({ x, y }); }
     drawPolygon(points) { this.polygons++; this.polygonPoints.push(points); }
+    drawCircle(x, y, radius) { this.circles.push({ x, y, radius }); }
   }
   class Primary extends Container {
     static SORT_LAYERS = { SCENE: 0, TILES: 500, TOKENS: 700 };
@@ -215,6 +218,203 @@ test("all 324 isometric cell centers round-trip, including scene padding and fra
     assert.equal(pointToCell(layout, project(layout, -0.5, 0.5)), null);
     assert.equal(pointToCell(layout, project(layout, 18.5, 0.5)), null);
     assert.equal(pointToCell(layout, { x: NaN, y: 1 }), null);
+  }
+});
+
+test("trapezoid mode has a shorter top, a wider bottom, and safely normalized Scene settings", () => {
+  for (const value of [undefined, null, "", "square", false, 1]) assert.equal(normalizeGridShape(value), "diamond");
+  assert.equal(normalizeGridShape("trapezoid"), "trapezoid");
+  for (const value of [undefined, null, "", " ", "bad", false, NaN, Infinity]) assert.equal(normalizeTopWidth(value), 50);
+  assert.equal(normalizeTopWidth(-1), 20);
+  assert.equal(normalizeTopWidth(120), 90);
+  assert.equal(normalizeTopWidth("65.8"), 66);
+  const rectangle = { x: 350, y: 250, width: 4000, height: 3000 };
+  const layout = createLayout({}, rectangle, { gridShape: "trapezoid" });
+  assert.deepEqual([project(layout, 0, 0), project(layout, 18, 0), project(layout, 18, 18), project(layout, 0, 18)], [
+    { x: 1350, y: 250 }, { x: 3350, y: 250 }, { x: 4350, y: 3250 }, { x: 350, y: 3250 }
+  ]);
+  assert.equal(project(layout, 9, 0).x, project(layout, 9, 18).x);
+  assert.equal(pointToCell(layout, { x: 900, y: 300 }), null);
+  assert.equal(unproject(layout, { x: layout.centerX, y: -10000 }), null);
+  const implicit = createLayout({}, rectangle);
+  const diamond = createLayout({}, rectangle, { gridShape: "diamond", topWidth: 90 });
+  for (const [column, row] of [[0, 0], [18, 0], [18, 18], [0, 18], [5.5, 3.5]]) {
+    assert.deepEqual(project(implicit, column, row), project(diamond, column, row));
+  }
+});
+
+test("trapezoid cells invert through tilt, rotation, taper, independent sizing and Scene padding", () => {
+  const rectangle = { x: 350.25, y: 250.75, width: 5327, height: 3243 };
+  for (const boardSize of [6, 18]) for (const topWidth of [20, 50, 90]) for (const tilt of [null, 5, 45, 85]) {
+    for (const rotation of [-170, -90, -35, 0, 45, 90]) {
+      const fitted = createLayout({}, rectangle, { gridShape: "trapezoid", topWidth, boardSize, tilt, rotation });
+      for (const [column, row] of [[0, 0], [boardSize, 0], [boardSize, boardSize], [0, boardSize]]) {
+        const point = project(fitted, column, row);
+        assert.ok(point.x >= rectangle.x - 1e-7 && point.x <= rectangle.x + rectangle.width + 1e-7);
+        assert.ok(point.y >= rectangle.y - 1e-7 && point.y <= rectangle.y + rectangle.height + 1e-7);
+      }
+      const layout = createLayout({}, rectangle, { gridShape: "trapezoid", topWidth, boardSize, tilt, rotation,
+        scaleX: 0.7, scaleY: 1.2, offsetX: -340, offsetY: 220 });
+      for (let row = 0; row < boardSize; row++) for (let column = 0; column < boardSize; column++) {
+        const cell = { column, row };
+        assert.deepEqual(pointToCell(layout, cellCenter(layout, cell)), cell);
+      }
+      for (const [column, row] of [[0.01, 0.01], [boardSize - 0.01, 0.01], [boardSize - 0.01, boardSize - 0.01]]) {
+        const coordinates = unproject(layout, project(layout, column, row));
+        assert.ok(Math.abs(coordinates.column - column) < 1e-8);
+        assert.ok(Math.abs(coordinates.row - row) < 1e-8);
+      }
+      for (const [column, row] of [[-0.5, 0.5], [0.5, -0.5], [boardSize + 0.5, 0.5], [0.5, boardSize + 0.5]]) {
+        assert.equal(pointToCell(layout, project(layout, column, row)), null);
+      }
+    }
+  }
+});
+
+test("all token footprints and artwork anchors round-trip on rotated trapezoid grids", () => {
+  const { TokenDocument } = harness();
+  for (const boardSize of [6, 18]) for (const topWidth of [20, 50, 90]) for (const rotation of [-90, 0, 35, 170]) {
+    const layout = createLayout({}, { x: 275.25, y: 185.75, width: 5327, height: 3243 }, {
+      gridShape: "trapezoid", boardSize, topWidth, rotation, tilt: 30, scaleX: 0.8, scaleY: 1.2
+    });
+    for (const width of [1, 2, 3, 4]) {
+      const document = new TokenDocument({ width, height: width + 2 });
+      for (let row = 0; row <= boardSize - width; row++) for (let column = 0; column <= boardSize - width; column++) {
+        const cell = { column, row };
+        const position = tokenPosition(document, layout, cell);
+        const anchor = footprintAnchor(layout, cell, width);
+        const feet = tokenBase(document, position);
+        assert.deepEqual(tokenFootprint(document, layout, position), { ...cell, size: width });
+        assert.deepEqual(tokenCell(document, layout, position), cell);
+        assert.deepEqual(pointToTokenCell(document, layout, feet), cell);
+        assert.ok(Math.abs(feet.x - anchor.x) <= 0.5 && Math.abs(feet.y - anchor.y) <= 0.5);
+        const coordinates = unproject(layout, anchor);
+        assert.ok(Math.abs(coordinates.column - (column + width / 2)) < 1e-8);
+        assert.ok(Math.abs(coordinates.row - (row + width / 2 + (width === 2 ? 0.5 : 0))) < 1e-8);
+      }
+    }
+  }
+});
+
+test("GM shape and top-width controls save per Scene, invalidate cached polygons and preserve tokens and Fit scene", async () => {
+  const { environment, token, hooks, scene, calls, module, setFlag } = harness();
+  setFlag({ enabled: true, custom: true });
+  const board = registerIsometricBoard(environment);
+  hooks.get("ready")[0]();
+  const origin = { x: token.document.x, y: token.document.y };
+  assert.deepEqual(board.shapeSelect.children.map(option => option.value), ["diamond", "trapezoid"]);
+  assert.equal(board.shapeSelect.value, "diamond");
+  assert.equal(board.topWidthControl.hidden, true);
+  const diamondGeometry = board.gridGeometry;
+  board.shapeSelect.value = "trapezoid";
+  board.shapeSelect.listeners.get("change")();
+  await Promise.resolve();
+  assert.equal(scene.getFlag().gridShape, "trapezoid");
+  assert.equal(board.gridShape, "trapezoid");
+  assert.equal(board.topWidthControl.hidden, false);
+  assert.equal(board.topWidthInput.min, "20");
+  assert.equal(board.topWidthInput.max, "90");
+  assert.equal(board.topWidthInput.value, "50");
+  assert.notEqual(board.gridGeometry, diamondGeometry);
+  assert.notDeepEqual(board.gridGeometry.cells[0].polygon, diamondGeometry.cells[0].polygon);
+  const trapezoidGeometry = board.gridGeometry;
+  board.topWidthInput.value = "70";
+  board.topWidthInput.listeners.get("input")();
+  assert.equal(board.topWidthOutput.textContent, "percentValue:70");
+  assert.equal(board.topWidth, 50);
+  board.topWidthInput.listeners.get("change")();
+  await Promise.resolve();
+  assert.equal(scene.getFlag().topWidth, 70);
+  assert.equal(module.api.isometricBoard.gridShape, "trapezoid");
+  assert.equal(module.api.isometricBoard.topWidth, 70);
+  assert.notEqual(board.gridGeometry, trapezoidGeometry);
+  assert.equal(new IsometricBoardOverlay(environment).gridShape, "trapezoid");
+  assert.equal(new IsometricBoardOverlay(environment).topWidth, 70);
+  assert.equal(await board.setBoardSize(12), 12);
+  await board.resetView();
+  assert.equal(board.gridShape, "trapezoid");
+  assert.equal(board.topWidth, 70);
+  assert.equal(board.boardSize, 12);
+  assert.equal(scene.getFlag().custom, true);
+  assert.equal(await module.api.isometricBoard.setGridShape("diamond"), "diamond");
+  assert.equal(board.topWidthControl.hidden, true);
+  assert.equal(board.topWidth, 70);
+  assert.equal(calls.moves.length, 0);
+  assert.deepEqual({ x: token.document.x, y: token.document.y }, origin);
+});
+
+test("players read shared shape settings but cannot change the shape or top width", async () => {
+  const { environment, hooks, calls, setFlag, module } = harness({ gm: false });
+  setFlag({ enabled: true, gridShape: "trapezoid", topWidth: 35 });
+  const board = registerIsometricBoard(environment);
+  hooks.get("ready")[0]();
+  assert.equal(board.shapeSelect.value, "trapezoid");
+  assert.equal(board.shapeSelect.disabled, true);
+  assert.equal(board.topWidthInput.value, "35");
+  assert.equal(board.topWidthInput.disabled, true);
+  assert.equal(await module.api.isometricBoard.setGridShape("diamond"), false);
+  assert.equal(await module.api.isometricBoard.setTopWidth(90), false);
+  assert.equal(board.gridShape, "trapezoid");
+  assert.equal(board.topWidth, 35);
+  assert.equal(calls.flags.length, 0);
+});
+
+test("shape and taper changes reject overlapping token footprints and restore their controls", async () => {
+  for (const change of ["shape", "taper"]) {
+    const context = harness();
+    const { environment, token, calls, hooks, setFlag } = context;
+    if (change === "taper") setFlag({ enabled: true, gridShape: "trapezoid", topWidth: 20 });
+    const board = registerIsometricBoard(environment);
+    const cell = change === "shape" ? { column: 6, row: 5 } : { column: 7, row: 2 };
+    Object.assign(token.document, tokenPosition(token.document, board.layout, cell));
+    addOccupant(context, change === "shape" ? { column: 6, row: 6 } : { column: 8, row: 2 });
+    hooks.get("ready")[0]();
+    assert.equal(change === "shape" ? await board.setGridShape("trapezoid") : await board.setTopWidth(90), false);
+    assert.deepEqual(calls.warnings, ["viewOccupied"]);
+    assert.equal(calls.flags.length, 0);
+    assert.equal(calls.moves.length, 0);
+    assert.equal(board.shapeSelect.value, change === "shape" ? "diamond" : "trapezoid");
+    assert.equal(board.topWidthInput.value, change === "shape" ? "50" : "20");
+  }
+});
+
+test("trapezoid movement, occupancy, token creation, ruler distances and destination bases agree for every creature size", async () => {
+  for (const size of [1, 2, 3, 4]) for (const topWidth of [20, 50, 90]) for (const rotation of [0, 35]) {
+    const context = harness({ gm: false, gridless: true });
+    const { environment, token, hooks, calls, setFlag, TokenDocument } = context;
+    setFlag({ enabled: true, gridShape: "trapezoid", topWidth, rotation, tilt: 30, offsetX: 100, offsetY: -70 });
+    Object.assign(token.document, { width: size, height: size + 2 });
+    usePaddedArtwork(token, environment);
+    const board = registerIsometricBoard(environment);
+    const from = { column: 2, row: 2 };
+    const target = { column: 8, row: 8 };
+    Object.assign(token.document, tokenPosition(token.document, board.layout, from, {}, environment));
+    const source = Object.freeze({ x: token.document.x, y: token.document.y, width: size, height: size + 2 });
+    const occupied = { column: target.column + size - 1, row: target.row + size - 1 };
+    addOccupant(context, occupied);
+    hooks.get("setup")[0]();
+    hooks.get("ready")[0]();
+    const anchor = footprintAnchor(board.layout, target, size);
+    const destination = Object.freeze({ ...tokenPosition(token.document, board.layout, target, {}, environment),
+      width: size, height: size + 2 });
+    assert.equal(await board.moveSelected(target), false);
+    assert.equal(token.dragTo(anchor).x, source.x);
+    assert.equal(hooks.get("preMoveToken")[0](token.document, { method: "dragging", destination }, {}), false);
+    assert.equal(hooks.get("preCreateToken")[0](new TokenDocument({ id: "spawn", cell: target, width: size, height: size + 2 }), {}, {}), false);
+    environment.canvas.tokens.placeables = [token];
+    const drag = token.dragTo(anchor);
+    assert.deepEqual(tokenCell(token.document, board.layout, drag, environment), target);
+    assert.equal(await board.moveSelected(target), true);
+    assert.equal(calls.moves.length, 1);
+    assert.deepEqual({ x: token.document.x, y: token.document.y }, { x: drag.x, y: drag.y });
+    const ruler = new environment.CONFIG.Token.rulerClass(token);
+    ruler.refresh(dragRulerData([source, destination]));
+    assert.deepEqual(ruler.basePath.starts, [tokenBase(token.document, source, environment)]);
+    assert.deepEqual(ruler.basePath.ends, [tokenBase(token.document, destination, environment)]);
+    assert.deepEqual(ruler.basePath.polygonPoints, [board.polygon(target, board.layout, size)]);
+    assert.equal(ruler._getWaypointLabelContext({ ...destination, stage: "planned", previous: source, index: 1 }, {}).cost.total, "30");
+    assert.equal(board.isOccupied({ id: "other", width: 1 }, occupied), true);
+    assert.equal(rangeBand({ ...target, size }, { column: target.column + size, row: target.row }), "close");
   }
 });
 
@@ -352,9 +552,9 @@ test("independent width and height preserve cell mapping, square count and legac
 
 test("all four frame corners resize width and height independently through rotation and camera zoom", async () => {
   for (const size of [6, 18]) for (const rotation of [0, -35, 90]) for (let corner = 0; corner < 4; corner++)
-  for (const [ratioX, ratioY] of [[1.25, 1.15], [1.25, 1], [1, 1.25]]) {
+  for (const [ratioX, ratioY] of [[1.25, 1.15], [1.25, 1], [1, 1.25]]) for (const gridShape of ["diamond", "trapezoid"]) {
     const { environment, hooks, scene, token, calls, setFlag, module } = harness({ opacity: 0 });
-    setFlag({ enabled: true, boardSize: size, rotation, tilt: 30, scale: 0.8, offsetX: 80, offsetY: -30, custom: true });
+    setFlag({ enabled: true, boardSize: size, gridShape, rotation, tilt: 30, scale: 0.8, offsetX: 80, offsetY: -30, custom: true });
     const zoom = 0.4;
     const pan = { x: -250, y: 150 };
     environment.canvas.app.canvas.getBoundingClientRect = () => ({ left: 10, top: 20, width: 500, height: 400 });
@@ -365,7 +565,7 @@ test("all four frame corners resize width and height independently through rotat
     hooks.get("ready")[0]();
     board.setGridMoveMode(true);
     assert.equal(board.gridHandles.parent, environment.canvas.controls);
-    assert.equal(board.gridHandles.polygons, 6);
+    assert.equal(board.gridHandles.polygons, 7);
     assert.ok(board.gridHandles.fillAlphas.every(alpha => alpha === 1));
     const pointer = point => gridPointer(board, 10 + (point.x - pan.x) * zoom / 2, 20 + (point.y - pan.y) * zoom / 2);
     const layout = board.layout;
@@ -415,6 +615,170 @@ test("all four frame corners resize width and height independently through rotat
     assert.equal(board.gridHandles, null);
     assert.equal(environment.canvas.controls.children.length, 0);
   }
+});
+
+test("the circular-arrow handle previews and saves rotation through camera transforms without translating or moving tokens", async () => {
+  for (const rotation of [-170, -35, 0, 90, 170]) for (const delta of [-45, 45]) for (const tilt of [null, 30])
+  for (const gridShape of ["diamond", "trapezoid"]) {
+    const { environment, scene, hooks, calls, token, setFlag, module } = harness();
+    setFlag({ enabled: true, boardSize: 12, gridShape, rotation, tilt, scaleX: 0.8, scaleY: 1.1,
+      offsetX: 80, offsetY: -30, custom: true });
+    const zoom = 0.4;
+    const pan = { x: -250, y: 150 };
+    environment.canvas.app.canvas.getBoundingClientRect = () => ({ left: 10, top: 20, width: 500, height: 400 });
+    environment.canvas.stage.toLocal = point => ({ x: point.x / zoom + pan.x, y: point.y / zoom + pan.y });
+    const board = registerIsometricBoard(environment);
+    Object.assign(token.document, tokenPosition(token.document, board.layout, { column: 5, row: 5 }));
+    const tokenOrigin = { x: token.document.x, y: token.document.y };
+    hooks.get("ready")[0]();
+    board.setGridMoveMode(true);
+    const initial = board.layout;
+    const handle = board.gridRotationHandle();
+    const grab = { x: handle.x + 4 * board.gridHandleUnit(), y: handle.y };
+    const pointer = point => gridPointer(board, 10 + (point.x - pan.x) * zoom / 2, 20 + (point.y - pan.y) * zoom / 2);
+    const radians = delta * Math.PI / 180;
+    const dx = grab.x - initial.centerX;
+    const dy = grab.y - initial.centerY;
+    const drop = { x: initial.centerX + dx * Math.cos(radians) - dy * Math.sin(radians),
+      y: initial.centerY + dx * Math.sin(radians) + dy * Math.cos(radians) };
+    const expected = ((rotation + delta + 180) % 360 + 360) % 360 - 180;
+    board.handlePointerMove(pointer(grab));
+    assert.equal(board.gridRotationHover, true);
+    assert.equal(board.gridResizeCorner, null);
+    board.handlePointerDown(pointer(grab));
+    assert.equal(board.gridDrag.action, "rotate");
+    assert.equal(board.rotation, rotation);
+    board.handleGridPointerMove(pointer(drop));
+    assert.equal(board.rotation, expected);
+    assert.equal(board.rotationInput.value, String(expected));
+    assert.equal(scene.getFlag().rotation, rotation);
+    assert.equal(calls.flags.length, 0);
+    assert.equal(board.layout.centerX, initial.centerX);
+    assert.equal(board.layout.centerY, initial.centerY);
+    assert.ok(Math.abs(board.layout.cellWidth - initial.cellWidth) < 1e-8);
+    assert.ok(Math.abs(board.layout.cellHeight - initial.cellHeight) < 1e-8);
+    assert.notEqual(await board.finishGridDrag(pointer(drop)), false);
+    assert.equal(calls.flags.length, 1);
+    assert.equal(scene.getFlag().rotation, expected);
+    assert.equal(scene.getFlag().custom, true);
+    assert.equal(board.offsetX, initial.offsetX);
+    assert.equal(board.offsetY, initial.offsetY);
+    assert.equal(module.api.isometricBoard.rotation, expected);
+    assert.equal(new IsometricBoardOverlay(environment).rotation, expected);
+    assert.equal(board.boardSize, 12);
+    assert.equal(board.feetPerCell, 5);
+    assert.deepEqual({ x: token.document.x, y: token.document.y }, tokenOrigin);
+    assert.equal(calls.moves.length, 0);
+    assert.equal(board.positionPreview, null);
+    assert.equal(board.gridRotationHover, false);
+  }
+});
+
+test("the rotation handle stays a constant screen size, has its own hover cursor, and does not save an unchanged click", async () => {
+  const { environment, hooks, calls } = harness();
+  const board = registerIsometricBoard(environment);
+  hooks.get("ready")[0]();
+  const classes = new Map();
+  board.view.classList.toggle = (name, active) => classes.set(name, active);
+  board.setGridMoveMode(true);
+  assert.equal(board.gridHandles.circles[0].radius, 12);
+  environment.canvas.stage.toLocal = point => ({ x: point.x * 2 + 100, y: point.y * 2 + 200 });
+  hooks.get("canvasPan")[0]();
+  calls.frames.at(-1)();
+  assert.equal(board.gridHandles.circles[0].radius, 24);
+  const handle = board.gridRotationHandle();
+  const pointer = point => gridPointer(board, 10 + (point.x - 100) / 2, 20 + (point.y - 200) / 2);
+  board.handlePointerMove(pointer(handle));
+  assert.equal(classes.get("mk-isometric-board-rotating"), true);
+  board.handlePointerDown(pointer(handle));
+  assert.equal(classes.get("mk-isometric-board-rotation-dragging"), true);
+  assert.equal(await board.finishGridDrag(pointer(handle)), false);
+  assert.equal(calls.flags.length, 0);
+  assert.equal(classes.get("mk-isometric-board-rotating"), false);
+  const corner = board.gridResizeCorners()[0];
+  board.handlePointerMove(pointer(corner));
+  assert.equal(board.gridResizeCorner, 0);
+  assert.equal(board.gridRotationHover, false);
+  board.onPointerLeave();
+  assert.equal(board.gridResizeCorner, null);
+  environment.game.user.isGM = false;
+  assert.equal(board.setGridMoveMode(true), false);
+});
+
+test("rotation drags ignore other pointers and restore the saved view after cancellation or a failed save", async () => {
+  for (const ending of ["escape", "cancel", "capture", "blur", "scene", "permission", "layer", "destroy", "failure"]) {
+    const { environment, scene, hooks, calls, setFlag } = harness();
+    const windowEvents = new Map();
+    environment.addEventListener = (type, handler) => windowEvents.set(type, handler);
+    environment.removeEventListener = type => windowEvents.delete(type);
+    setFlag({ enabled: true, rotation: 35, tilt: 30, scaleX: 0.8, scaleY: 1.1, offsetX: 70, offsetY: -40 });
+    const board = registerIsometricBoard(environment);
+    hooks.get("ready")[0]();
+    board.setGridMoveMode(true);
+    const original = board.layout;
+    const view = board.view;
+    const handle = board.gridRotationHandle();
+    const pointer = (point, options) => gridPointer(board, point.x + 10, point.y + 20, options);
+    const dx = handle.x - original.centerX;
+    const dy = handle.y - original.centerY;
+    const destination = { x: original.centerX - dy, y: original.centerY + dx };
+    board.handlePointerDown(pointer(handle));
+    board.handleGridPointerMove(pointer(destination, { pointerId: 2 }));
+    assert.equal(board.positionPreview, null);
+    assert.equal(await board.finishGridDrag(pointer(destination, { pointerId: 2 })), false);
+    board.handleGridPointerMove(pointer(destination));
+    assert.equal(board.rotation, 125);
+    if (ending === "escape") board.onKeyDown({ key: "Escape" });
+    if (ending === "cancel") environment.document.listeners.get("pointercancel")({ pointerId: 1 });
+    if (ending === "capture") view.releasePointerCapture(1);
+    if (ending === "blur") windowEvents.get("blur")();
+    if (ending === "scene") hooks.get("updateScene")[0](scene);
+    if (ending === "permission") environment.game.user.isGM = false;
+    if (ending === "layer") hooks.get("deactivateTokenLayer")[0]();
+    if (ending === "destroy") board.destroy();
+    if (ending === "failure") {
+      scene.setFlag = async () => { throw new Error("rotation save failed"); };
+      await assert.rejects(board.finishGridDrag(pointer(destination)), /rotation save failed/);
+    } else assert.equal(await board.finishGridDrag(pointer(destination)), false);
+    assert.equal(board.rotation, 35, ending);
+    assert.equal(board.scaleX, original.scaleX, ending);
+    assert.equal(board.scaleY, original.scaleY, ending);
+    assert.equal(board.offsetX, original.offsetX, ending);
+    assert.equal(board.offsetY, original.offsetY, ending);
+    assert.equal(board.positionPreview, null, ending);
+    assert.equal(board.gridDrag, null, ending);
+    assert.equal(board.gridRotationHover, false, ending);
+    assert.equal(view.hasPointerCapture(1), false, ending);
+    assert.equal(board.gridSaving, false, ending);
+    assert.equal(calls.flags.length, 0, ending);
+    assert.equal(calls.moves.length, 0, ending);
+    if (board.rotationInput) assert.equal(board.rotationInput.value, "35", ending);
+  }
+});
+
+test("rotation that would leave a Large base partly outside the board is rejected without moving tokens", async () => {
+  const { environment, token, calls, hooks } = harness();
+  const board = registerIsometricBoard(environment);
+  Object.assign(token.document, { width: 2, height: 4 });
+  Object.assign(token.document, tokenPosition(token.document, board.layout, { column: 1, row: 0 }));
+  const tokenOrigin = { x: token.document.x, y: token.document.y };
+  hooks.get("ready")[0]();
+  board.setGridMoveMode(true);
+  const original = board.layout;
+  const handle = board.gridRotationHandle();
+  const angle = Math.PI / 6;
+  const dy = handle.y - original.centerY;
+  const destination = { x: original.centerX - dy * Math.sin(angle), y: original.centerY + dy * Math.cos(angle) };
+  board.handlePointerDown(gridPointer(board, handle.x + 10, handle.y + 20));
+  assert.equal(await board.finishGridDrag(gridPointer(board, destination.x + 10, destination.y + 20)), false);
+  assert.equal(board.rotation, 0);
+  assert.equal(board.rotationInput.value, "0");
+  assert.equal(board.scaleX, 1);
+  assert.equal(board.scaleY, 1);
+  assert.deepEqual(calls.warnings, ["viewOccupied"]);
+  assert.equal(calls.flags.length, 0);
+  assert.equal(calls.moves.length, 0);
+  assert.deepEqual({ x: token.document.x, y: token.document.y }, tokenOrigin);
 });
 
 test("corner drags shrink one axis without jumping when grabbed off-center, and cannot invert either dimension", async () => {
@@ -1164,6 +1528,27 @@ test("every creature size snaps its visible base to its placement anchor and occ
   }
 });
 
+test("rounded Large anchors stay in their cells at minimum axis scales and extreme tilts", () => {
+  const { TokenDocument } = harness();
+  const document = new TokenDocument({ width: 2, height: 4 });
+  for (const rectangle of [
+    { x: 0, y: 0, width: 4000, height: 3000 },
+    { x: 275.25, y: 185.75, width: 4000, height: 3000 }
+  ]) for (const tilt of [5, 45, 85]) for (const rotation of [0, 33, 90, 137]) {
+    for (const [scaleX, scaleY] of [[0.1, 0.1], [1, 0.1], [0.1, 1], [4, 0.1], [0.1, 4]]) {
+      const layout = createLayout({}, rectangle, { tilt, rotation, scaleX, scaleY });
+      for (let row = 0; row < layout.size - 1; row++) for (let column = 0; column < layout.size - 1; column++) {
+        const cell = { column, row };
+        const position = tokenPosition(document, layout, cell);
+        const context = JSON.stringify({ rectangle, tilt, rotation, scaleX, scaleY, cell });
+        assert.deepEqual(tokenFootprint(document, layout, position), { ...cell, size: 2 }, context);
+        assert.deepEqual(tokenCell(document, layout, position), cell, context);
+        assert.deepEqual(pointToTokenCell(document, layout, tokenBase(document, position)), cell, context);
+      }
+    }
+  }
+});
+
 test("Large feet sit toward the bottom of their 2x2 base while previously centered tokens keep their occupied cells", () => {
   const { TokenDocument } = harness();
   for (const rectangle of [
@@ -1349,7 +1734,9 @@ test("red enemies follow the snapped drag endpoint and restore the actual positi
 });
 
 test("dragging previews Close between full sized bases on transformed grids using artwork anchors", async () => {
-  for (const view of [{}, { tilt: 25, rotation: 35, offsetX: 120, offsetY: 80 }]) for (const size of [1, 2, 3, 4]) {
+  for (const view of [{}, { tilt: 25, rotation: 35, offsetX: 120, offsetY: 80 },
+    { gridShape: "trapezoid", topWidth: 35, tilt: 25, rotation: 35, offsetX: 120, offsetY: 80 }])
+  for (const size of [1, 2, 3, 4]) {
     const context = harness({ gm: false });
     const { environment, hooks, token, calls, setFlag } = context;
     setFlag({ enabled: true, ...view });
@@ -1662,9 +2049,10 @@ test("drag previews, added waypoints, and Board Move share the artwork base and 
   assert.equal(token.document.getSnappedPosition(position).native, true);
 });
 
-test("native gridless and gridded drags snap anywhere in the destination diamond to its center", async () => {
-  for (const gridless of [true, false]) for (const artwork of [false, true]) {
-    const { environment, hooks, token, calls } = harness({ gridless });
+test("native gridless and gridded drags snap anywhere in diamond and trapezoid cells to their centers", async () => {
+  for (const gridless of [true, false]) for (const artwork of [false, true]) for (const gridShape of ["diamond", "trapezoid"]) {
+    const { environment, hooks, token, calls, setFlag } = harness({ gridless });
+    setFlag({ enabled: true, gridShape });
     if (artwork) usePaddedArtwork(token, environment);
     const board = registerIsometricBoard(environment);
     hooks.get("ready")[0]();
@@ -2218,7 +2606,7 @@ test("board toggles, off-scene tokens and teardown restore native borders and re
   assert.equal(board.tokenSelections.has(token), false);
 });
 
-test("hover and Board Move show neither destination boxes nor lines, retaining native collision centers", async () => {
+test("hover and Board Move show neither destination boxes nor lines and wall checks use artwork bases", async () => {
   const { environment, token, calls } = harness();
   const board = new IsometricBoardOverlay(environment);
   board.refresh();
@@ -2234,13 +2622,92 @@ test("hover and Board Move show neither destination boxes nor lines, retaining n
     assert.match(board.status.textContent, /nearMove|longMove/);
   }
   let collisionDestination;
-  token.checkCollision = point => { collisionDestination = point; return false; };
+  let collisionOptions;
+  const origin = tokenBase(token.document);
+  token.checkCollision = (point, options) => { collisionDestination = point; collisionOptions = options; return false; };
   await board.moveSelected(destination);
   board.draw();
   assert.deepEqual(board.graphics.ends, []);
   assert.equal(board.graphics.polygons, board.boardSize ** 2);
-  assert.deepEqual(collisionDestination, token.document.getCenterPoint(calls.moves[0].position));
-  assert.notDeepEqual(collisionDestination, tokenBase(token.document));
+  assert.deepEqual(collisionDestination, { ...tokenBase(token.document), elevation: 0 });
+  assert.deepEqual(collisionOptions, { origin: { ...origin, elevation: 0 }, type: "move", mode: "any" });
+  assert.notDeepEqual(collisionDestination, token.document.getCenterPoint(calls.moves[0].position));
+});
+
+test("Board Move rejects floor-wall crossings and permits paths whose artwork center crosses a different wall", async () => {
+  for (const [wallY, expected] of [[1000, false], [850, true]]) {
+    const { environment, token, calls } = harness({ gm: false });
+    const board = new IsometricBoardOverlay(environment);
+    token.document.height = 3;
+    Object.assign(token.document, tokenPosition(token.document, board.layout, { column: 5, row: 5 }));
+    const source = { x: token.document.x, y: token.document.y };
+    const target = { column: 6, row: 6 };
+    const crossesWall = (from, to) => (from.y - wallY) * (to.y - wallY) < 0;
+    const destination = tokenPosition(token.document, board.layout, target);
+    assert.equal(crossesWall(tokenBase(token.document), tokenBase(token.document, destination)), !expected);
+    assert.equal(crossesWall(token.document.getCenterPoint(), token.document.getCenterPoint(destination)), expected);
+    token.checkCollision = (to, { origin }) => crossesWall(origin ?? token.document.getCenterPoint(), to);
+    assert.equal(await board.moveSelected(target), expected);
+    assert.equal(calls.moves.length, expected ? 1 : 0);
+    assert.deepEqual(calls.warnings, expected ? [] : ["blocked"]);
+    if (!expected) assert.deepEqual({ x: token.document.x, y: token.document.y }, source);
+  }
+});
+
+test("v13 and v14 native movement constraints use bases without changing document centers or movement options", () => {
+  for (const version of [13, 14]) {
+    const { environment, token, TokenDocument, hooks, setFlag } = harness({ gm: false });
+    const originMethod = version === 14 ? "getMovementOrigin" : "getCenterPoint";
+    if (version === 14) TokenDocument.prototype.getMovementOrigin = function(position = {}) {
+      return { ...this.getCenterPoint(position), elevation: (position.elevation ?? this.elevation) + 7.5 };
+    };
+    const nativeCalls = [];
+    environment.CONFIG.Token.objectClass.prototype.constrainMovementPath = function(waypoints, options = {}) {
+      if (options.fail) throw new Error("native constraint failed");
+      // Foundry calculates both the ray and its pivot from the document origin.
+      const points = waypoints.map(position => this.document[originMethod](position));
+      const pivot = this.document[originMethod]({ x: 0, y: 0, elevation: 0 });
+      nativeCalls.push({ waypoints, options, points, pivot });
+      const path = [];
+      for (let index = 0; index < waypoints.length; index++) {
+        if (index && !options.ignoreWalls && (points[index - 1].y - options.wallY) * (points[index].y - options.wallY) < 0) {
+          return [path, true];
+        }
+        path.push({ ...waypoints[index] });
+      }
+      return [path, false];
+    };
+    const board = registerIsometricBoard(environment);
+    hooks.get("ready")[0]();
+    token.document.height = 3;
+    Object.assign(token.document, tokenPosition(token.document, board.layout, { column: 5, row: 5 }));
+    const source = Object.freeze({ x: token.document.x, y: token.document.y, elevation: 10 });
+    const target = Object.freeze({ ...tokenPosition(token.document, board.layout, { column: 6, row: 6 }), elevation: 20 });
+    const waypoints = Object.freeze([source, target]);
+    const options = Object.freeze({ preview: true, wallY: 1000 });
+    const centers = waypoints.map(position => token.document.getCenterPoint(position));
+    const nativeOrigins = waypoints.map(position => token.document[originMethod](position));
+    assert.equal(token.constrainMovementPath(waypoints, options)[1], true);
+    assert.equal(nativeCalls[0].waypoints, waypoints);
+    assert.equal(nativeCalls[0].options, options);
+    assert.deepEqual(nativeCalls[0].points, waypoints.map(position => ({
+      ...tokenBase(token.document, position), ...(version === 14 ? { elevation: position.elevation + 7.5 } : {})
+    })));
+    assert.deepEqual(nativeCalls[0].pivot, {
+      ...tokenBase(token.document, { x: 0, y: 0 }), ...(version === 14 ? { elevation: 7.5 } : {})
+    });
+    assert.equal(token.constrainMovementPath(waypoints, { wallY: 850 })[1], false);
+    assert.equal(token.constrainMovementPath(waypoints, { ...options, ignoreWalls: true })[1], false);
+    assert.throws(() => token.constrainMovementPath(waypoints, { fail: true }), /native constraint failed/);
+    assert.deepEqual(waypoints.map(position => token.document.getCenterPoint(position)), centers);
+    assert.deepEqual(waypoints.map(position => token.document[originMethod](position)), nativeOrigins);
+    assert.equal(board.movementOrigins.has(token.document), false);
+    token.document.parent = { id: "other-scene" };
+    assert.equal(token.constrainMovementPath(waypoints, options)[1], false);
+    token.document.parent = environment.canvas.scene;
+    setFlag({ enabled: false });
+    assert.equal(token.constrainMovementPath(waypoints, options)[1], false);
+  }
 });
 
 test("native drag paths and labels use bases across token size changes without mutating waypoints", () => {
@@ -2306,7 +2773,8 @@ test("base rulers show only active drag routes and boxes, clearing both after dr
 });
 
 test("drag selection boxes follow snapped waypoint footprints and angles instead of mouse hover", () => {
-  for (const view of [{}, { tilt: 25, rotation: 35 }]) for (const size of [1, 2, 3, 4]) {
+  for (const view of [{}, { tilt: 25, rotation: 35 }, { gridShape: "trapezoid", topWidth: 35, tilt: 25, rotation: 35 }])
+  for (const size of [1, 2, 3, 4]) {
     const { environment, hooks, token, setFlag } = harness();
     setFlag({ enabled: true, ...view });
     usePaddedArtwork(token, environment);

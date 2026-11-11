@@ -1,6 +1,6 @@
 # MK-Isometric-Board
 
-Place an adjustable diamond grid over an isometric map in Foundry VTT. Drag full-body tokens by their feet and see their bases, destinations, and movement distances on the board.
+Place an adjustable diamond or trapezoid grid over a map in Foundry VTT. Drag full-body tokens by their feet and see their bases, destinations, and movement distances on the board.
 
 ## Install
 
@@ -14,7 +14,7 @@ Then enable **MK-Isometric-Board** in **Manage Modules** in your world. The modu
 
 1. Create a Scene with the isometric map as its background and choose a gridless native Scene grid.
 2. In the GM's **Token Controls**, click the chessboard to enable the overlay for that Scene. Click the sliders to open its settings.
-3. Select **6 × 6 to 18 × 18** cells. Adjust tilt and rotation, then use **Move Grid** to align the board to the floor. Drag the corner handles to resize each axis and choose **Done** to finish.
+3. Choose **Diamond** or **Trapezoid** under **Grid shape**, then select **6 × 6 to 18 × 18** cells. Trapezoid has a shorter top edge and a wider bottom edge; use **Top width** to adjust the taper. Adjust tilt and rotation, then use **Move Grid** to align the board to the floor. Drag the corner handles to resize each axis, or drag the circular-arrow handle above the frame to rotate around the grid's center. Choose **Done** to finish.
 4. Place upright transparent tokens and drag them by the base. The board checks whether their footprint fits and whether other tokens occupy the destination. Set walls and doors along the floor edges of the artwork.
 
 The board overlays an existing image. The image determines the perspective of the terrain. Board geometry and line color are saved per Scene. Opacity is saved per client and can also be set in **Configure Settings → Module Settings**.

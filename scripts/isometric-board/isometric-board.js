@@ -1,6 +1,7 @@
 import {
   MIN_BOARD_SIZE, MAX_BOARD_SIZE, FEET_PER_CELL, CLOSE_DISTANCE, NEAR_DISTANCE, readLayout, readBoardSize, normalizeBoardSize,
   MIN_TILT, MAX_TILT, normalizeTilt, normalizeRotation, normalizeOffset, normalizeScale, project, unproject,
+  MIN_TOP_WIDTH, MAX_TOP_WIDTH, normalizeGridShape, normalizeTopWidth,
   validCell, cellDistance, rangeBand, cellLabel, tokenCell, tokenPosition, tokenBase, tokenTop,
   tokenFootprintSize, tokenFootprint, footprintCells, footprintDistance, validFootprint, pointToTokenCell
 } from "./geometry.js";
@@ -42,6 +43,7 @@ export class IsometricBoardOverlay {
     this.gridMoveMode = false;
     this.gridDrag = null;
     this.gridResizeCorner = null;
+    this.gridRotationHover = false;
     this.gridHandles = null;
     this.positionPreview = null;
     this.gridSaving = false;
@@ -58,9 +60,16 @@ export class IsometricBoardOverlay {
     this.selectionTime = 0;
     this.onSelectionTick = () => this.animateSelectionArrows();
     this.pendingDestinations = new Map();
+    this.movementOrigins = new WeakSet();
     this.onPointerDown = event => { if (event.target === this.view) this.handlePointerDown(event); };
     this.onPointerMove = event => this.handlePointerMove(event);
-    this.onPointerLeave = () => { this.hover = null; this.gridResizeCorner = null; this.syncGridMoveControls(); this.schedule(); };
+    this.onPointerLeave = () => {
+      this.hover = null;
+      this.gridResizeCorner = null;
+      this.gridRotationHover = false;
+      this.syncGridMoveControls();
+      this.schedule();
+    };
     this.onGridPointerMove = event => this.handleGridPointerMove(event);
     this.onGridPointerUp = event => { void this.finishGridDrag(event).catch(error => this.reportError(error)); };
     this.onGridPointerCancel = event => { if (event.pointerId === this.gridDrag?.pointerId) this.cancelGridDrag(); };
@@ -97,6 +106,8 @@ export class IsometricBoardOverlay {
   get sceneBounds() { return this.canvas?.scene?.getDimensions?.()?.sceneRect ?? this.canvas?.dimensions?.sceneRect; }
   get feetPerCell() { return FEET_PER_CELL; }
   get boardSize() { return readBoardSize(this.canvas?.scene); }
+  get gridShape() { return this.layout.gridShape; }
+  get topWidth() { return this.layout.topWidth; }
   get tilt() { return this.layout.tilt; }
   get rotation() { return this.layout.rotation; }
   get offsetX() { return this.layout.offsetX; }
@@ -142,6 +153,8 @@ export class IsometricBoardOverlay {
     if (!this.game?.user?.isGM || !this.canvas?.ready || !this.canvas.scene) return false;
     const scene = this.canvas.scene;
     const changes = {};
+    if ("gridShape" in settings) changes.gridShape = normalizeGridShape(settings.gridShape);
+    if ("topWidth" in settings) changes.topWidth = normalizeTopWidth(settings.topWidth);
     if ("tilt" in settings) changes.tilt = normalizeTilt(settings.tilt);
     if ("rotation" in settings) changes.rotation = normalizeRotation(settings.rotation);
     for (const key of ["scaleX", "scaleY"]) if (key in settings) changes[key] = normalizeScale(settings[key]);
@@ -150,8 +163,19 @@ export class IsometricBoardOverlay {
     if (!this.checkLayout(layout, "viewOccupied")) return false;
     await scene.setFlag(MODULE_ID, FLAG, { ...scene.getFlag(MODULE_ID, FLAG), ...changes });
     this.refresh();
-    return { tilt: layout.tilt, rotation: layout.rotation, offsetX: layout.offsetX, offsetY: layout.offsetY,
+    return { gridShape: layout.gridShape, topWidth: layout.topWidth,
+      tilt: layout.tilt, rotation: layout.rotation, offsetX: layout.offsetX, offsetY: layout.offsetY,
       scaleX: layout.scaleX, scaleY: layout.scaleY };
+  }
+
+  async setGridShape(value) {
+    const result = await this.setView({ gridShape: value });
+    return result === false ? false : result.gridShape;
+  }
+
+  async setTopWidth(value) {
+    const result = await this.setView({ topWidth: value });
+    return result === false ? false : result.topWidth;
   }
 
   async setTilt(value) {
@@ -205,6 +229,17 @@ export class IsometricBoardOverlay {
     }
     if (this.boardSizeOutput) this.boardSizeOutput.textContent = this.text("boardSizeValue", { size });
     const layout = this.layout;
+    if (this.shapeSelect) {
+      this.shapeSelect.value = layout.gridShape;
+      this.shapeSelect.disabled = !this.game?.user?.isGM;
+    }
+    if (this.topWidthControl) this.topWidthControl.hidden = layout.gridShape !== "trapezoid";
+    if (this.topWidthInput) {
+      this.topWidthInput.value = String(layout.topWidth);
+      this.topWidthInput.disabled = !this.game?.user?.isGM;
+      this.topWidthInput.setAttribute("aria-valuetext", this.text("percentValue", { value: layout.topWidth }));
+    }
+    if (this.topWidthOutput) this.topWidthOutput.textContent = this.text("percentValue", { value: layout.topWidth });
     for (const kind of ["tilt", "rotation"]) {
       const angle = Math.round(layout[kind]);
       const automatic = kind === "tilt" && layout.autoTilt;
@@ -309,6 +344,9 @@ export class IsometricBoardOverlay {
     if (this.gridMoveHint) this.gridMoveHint.hidden = !this.gridMoveMode;
     this.view?.classList.toggle("mk-isometric-board-positioning", this.gridMoveMode);
     this.view?.classList.toggle("mk-isometric-board-position-dragging", Boolean(this.gridDrag));
+    const rotating = this.gridMoveMode && (this.gridDrag ? this.gridDrag.action === "rotate" : this.gridRotationHover);
+    this.view?.classList.toggle("mk-isometric-board-rotating", rotating);
+    this.view?.classList.toggle("mk-isometric-board-rotation-dragging", rotating && Boolean(this.gridDrag));
     const corner = this.gridDrag?.corner ?? this.gridResizeCorner;
     const resizing = this.gridMoveMode && corner !== null && corner !== undefined;
     this.view?.classList.toggle("mk-isometric-board-resizing", resizing);
@@ -325,7 +363,7 @@ export class IsometricBoardOverlay {
     if (enabled && this.moveMode) this.setMoveMode(false);
     if (!enabled) this.cancelGridDrag();
     this.gridMoveMode = Boolean(enabled);
-    if (!enabled) this.gridResizeCorner = null;
+    if (!enabled) { this.gridResizeCorner = null; this.gridRotationHover = false; }
     const method = this.gridMoveMode ? "addEventListener" : "removeEventListener";
     for (const [type, handler] of [["pointermove", this.onGridPointerMove], ["pointerup", this.onGridPointerUp],
       ["pointercancel", this.onGridPointerCancel]]) this.env.document?.[method](type, handler, true);
@@ -346,8 +384,9 @@ export class IsometricBoardOverlay {
     this.gridDrag = null;
     this.positionPreview = null;
     this.gridResizeCorner = null;
+    this.gridRotationHover = false;
     this.releaseGridPointer(drag);
-    this.syncGridMoveControls();
+    this.syncGridSizeControls();
     this.schedule();
   }
 
@@ -360,8 +399,12 @@ export class IsometricBoardOverlay {
     if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
     const layout = this.layout;
     const corner = this.gridCornerAt(point, layout);
+    const action = corner !== null ? "resize" : this.gridRotationAt(point, layout) ? "rotate" : "move";
     const { offsetX, offsetY, scaleX, scaleY } = layout;
-    this.gridDrag = { pointerId: event.pointerId, scene: this.canvas.scene, point, offsetX, offsetY, scaleX, scaleY, layout, corner };
+    this.gridDrag = { pointerId: event.pointerId, scene: this.canvas.scene, point,
+      offsetX, offsetY, scaleX, scaleY, layout, corner, action };
+    this.gridResizeCorner = corner;
+    this.gridRotationHover = action === "rotate";
     this.view?.setPointerCapture?.(event.pointerId);
     this.syncGridMoveControls();
   }
@@ -374,6 +417,24 @@ export class IsometricBoardOverlay {
     if (!this.enabled || !this.game?.user?.isGM || this.canvas.scene !== drag.scene) { this.cancelGridDrag(); return; }
     const point = this.eventPoint(event);
     if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+    if (drag.action === "rotate") {
+      const { centerX, centerY, rotation, cellWidth, cellHeight } = drag.layout;
+      if (Math.hypot(point.x - centerX, point.y - centerY) < this.gridHandleUnit()) return;
+      const startAngle = Math.atan2(drag.point.y - centerY, drag.point.x - centerX);
+      const angle = Math.atan2(point.y - centerY, point.x - centerX);
+      const degrees = ((rotation + (angle - startAngle) * 180 / Math.PI + 180) % 360 + 360) % 360 - 180;
+      const nextRotation = normalizeRotation(degrees);
+      // Compensate for the Scene-fit calculation so rotating keeps the
+      // existing width and height wherever the allowed axis scales permit.
+      const fitted = readLayout(drag.scene, this.sceneBounds, { rotation: nextRotation, scaleX: 1, scaleY: 1 });
+      this.positionPreview = {
+        rotation: nextRotation, offsetX: drag.offsetX, offsetY: drag.offsetY,
+        scaleX: normalizeScale(cellWidth / fitted.cellWidth), scaleY: normalizeScale(cellHeight / fitted.cellHeight)
+      };
+      this.syncGridSizeControls();
+      this.schedule();
+      return;
+    }
     this.positionPreview = {
       offsetX: normalizeOffset(drag.offsetX + point.x - drag.point.x),
       offsetY: normalizeOffset(drag.offsetY + point.y - drag.point.y)
@@ -407,19 +468,22 @@ export class IsometricBoardOverlay {
     this.gridDrag = null;
     this.releaseGridPointer(drag);
     if (!position || (position.offsetX === drag.offsetX && position.offsetY === drag.offsetY
-      && (position.scaleX ?? drag.scaleX) === drag.scaleX && (position.scaleY ?? drag.scaleY) === drag.scaleY)) {
+      && Math.abs((position.scaleX ?? drag.scaleX) - drag.scaleX) < 1e-10
+      && Math.abs((position.scaleY ?? drag.scaleY) - drag.scaleY) < 1e-10
+      && ((position.rotation ?? drag.layout.rotation) - drag.layout.rotation) % 360 === 0)) {
       this.cancelGridDrag();
       return false;
     }
     this.gridSaving = true;
     this.syncGridMoveControls();
     try {
-      return drag.corner === null ? await this.setPosition(position.offsetX, position.offsetY) : await this.setView(position);
+      return drag.action === "move" ? await this.setPosition(position.offsetX, position.offsetY) : await this.setView(position);
     } finally {
       this.gridSaving = false;
       this.positionPreview = null;
       this.gridResizeCorner = null;
-      this.syncGridMoveControls();
+      this.gridRotationHover = false;
+      this.syncGridSizeControls();
       this.schedule();
     }
   }
@@ -705,9 +769,10 @@ export class IsometricBoardOverlay {
     const output = this[`${kind}Output`] = document.createElement("output");
     output.setAttribute("for", input.id);
     input.addEventListener("input", () => {
-      const angle = kind === "tilt" ? normalizeTilt(input.value) ?? MIN_TILT : normalizeRotation(input.value);
-      input.value = String(angle);
-      output.textContent = this.text("angleValue", { angle });
+      const value = kind === "topWidth" ? normalizeTopWidth(input.value)
+        : kind === "tilt" ? normalizeTilt(input.value) ?? MIN_TILT : normalizeRotation(input.value);
+      input.value = String(value);
+      output.textContent = kind === "topWidth" ? this.text("percentValue", { value }) : this.text("angleValue", { angle: value });
       input.setAttribute("aria-valuetext", output.textContent);
     });
     input.addEventListener("change", () => {
@@ -717,6 +782,32 @@ export class IsometricBoardOverlay {
       });
     });
     control.append(label, input, output);
+    return control;
+  }
+
+  createGridShapeControl() {
+    const document = this.env.document;
+    const control = document.createElement("div");
+    control.className = "mk-isometric-board-shape";
+    control.title = this.text("gridShapeHint");
+    const label = document.createElement("label");
+    label.htmlFor = "mk-isometric-board-shape";
+    label.textContent = this.text("gridShape");
+    this.shapeSelect = document.createElement("select");
+    this.shapeSelect.id = label.htmlFor;
+    for (const shape of ["diamond", "trapezoid"]) {
+      const option = document.createElement("option");
+      option.value = shape;
+      option.textContent = this.text(`${shape}Shape`);
+      this.shapeSelect.append(option);
+    }
+    this.shapeSelect.addEventListener("change", () => {
+      void this.setGridShape(this.shapeSelect.value).catch(error => {
+        this.syncGridSizeControls();
+        this.reportError(error);
+      });
+    });
+    control.append(label, this.shapeSelect);
     return control;
   }
 
@@ -871,6 +962,8 @@ export class IsometricBoardOverlay {
     boardSizeControl.append(boardSizeLabel, this.boardSizeInput, this.boardSizeOutput);
     const tiltControl = this.createViewControl("tilt", MIN_TILT, MAX_TILT);
     const rotationControl = this.createViewControl("rotation", -180, 180);
+    const shapeControl = this.createGridShapeControl();
+    this.topWidthControl = this.createViewControl("topWidth", MIN_TOP_WIDTH, MAX_TOP_WIDTH);
     const colorControl = this.createGridColorControl();
     this.syncGridSizeControls();
     this.status = document.createElement("div");
@@ -891,7 +984,7 @@ export class IsometricBoardOverlay {
     const rangeHeading = document.createElement("summary");
     rangeHeading.textContent = this.text("rangesSection");
     ranges.append(rangeHeading, this.ranges, legend);
-    body.append(section("layoutSection", boardSizeControl, tiltControl, rotationControl, positionControl),
+    body.append(section("layoutSection", shapeControl, boardSizeControl, this.topWidthControl, tiltControl, rotationControl, positionControl),
       section("appearanceSection", opacityControl, colorControl), this.status, ranges);
     this.hud.append(this.panelHeader, body);
     document.body.append(this.hud);
@@ -939,6 +1032,16 @@ export class IsometricBoardOverlay {
     return index < 0 ? null : index;
   }
 
+  gridRotationHandle(layout = this.layout) {
+    const distance = layout.size * layout.cellHeight / 2 + 36 * this.gridHandleUnit();
+    return { x: layout.centerX + distance * layout.sin, y: layout.centerY - distance * layout.cos };
+  }
+
+  gridRotationAt(point, layout = this.layout) {
+    const handle = this.gridRotationHandle(layout);
+    return Math.hypot(point.x - handle.x, point.y - handle.y) <= 14 * this.gridHandleUnit();
+  }
+
   drawGridHandles(layout = this.layout) {
     if (!this.gridMoveMode || !this.enabled || !this.game?.user?.isGM || !this.root) {
       this.gridHandles?.parent?.removeChild(this.gridHandles);
@@ -967,6 +1070,23 @@ export class IsometricBoardOverlay {
         .map((value, index) => value * radius + (index % 2 ? corner.y : corner.x)));
       graphics.endFill();
     }
+    const handle = this.gridRotationHandle(layout);
+    graphics.lineStyle(unit, 0xffd782, 0.8);
+    graphics.moveTo((corners[0].x + corners[1].x) / 2, (corners[0].y + corners[1].y) / 2);
+    graphics.lineTo(handle.x, handle.y);
+    graphics.lineStyle(1.5 * unit, 0xffd782, 1);
+    graphics.beginFill(this.gridRotationHover || this.gridDrag?.action === "rotate" ? 0x68502e : 0x191d23, 1);
+    graphics.drawCircle(handle.x, handle.y, 12 * unit);
+    graphics.endFill();
+    // Draw a circular arrow without depending on a canvas font or icon asset.
+    const arcRadius = 6 * unit;
+    for (let step = 0; step <= 18; step++) {
+      const angle = (-0.75 + step / 12) * Math.PI;
+      graphics[step ? "lineTo" : "moveTo"](handle.x + Math.cos(angle) * arcRadius, handle.y + Math.sin(angle) * arcRadius);
+    }
+    graphics.beginFill(0xffd782, 1);
+    graphics.drawPolygon([-7, 1, -7, 6, -2, 6].map((value, index) => value * unit + (index % 2 ? handle.y : handle.x)));
+    graphics.endFill();
   }
 
   draggedFootprint(token, layout) {
@@ -1013,7 +1133,7 @@ export class IsometricBoardOverlay {
     const opacity = this.opacity / 100;
     const gridColor = Number.parseInt(this.gridColor.slice(1), 16);
     if (!this.canMove(token) && this.moveMode) this.setMoveMode(false);
-    const geometryKey = [layout.size, layout.originX, layout.originY, layout.cellWidth, layout.cellHeight,
+    const geometryKey = [layout.size, layout.gridShape, layout.topWidth, layout.originX, layout.originY, layout.cellWidth, layout.cellHeight,
       layout.centerX, layout.centerY, layout.cos, layout.sin].join("|");
     if (geometryKey !== this.gridGeometry?.key) {
       const cells = [];
@@ -1086,9 +1206,12 @@ export class IsometricBoardOverlay {
       const point = this.eventPoint(event);
       if (!this.gridDrag && point) {
         const corner = this.gridCornerAt(point);
-        if (corner !== this.gridResizeCorner) {
+        const rotation = corner === null && this.gridRotationAt(point);
+        if (corner !== this.gridResizeCorner || rotation !== this.gridRotationHover) {
           this.gridResizeCorner = corner;
+          this.gridRotationHover = rotation;
           this.syncGridMoveControls();
+          this.schedule();
         }
       }
       return;
@@ -1133,8 +1256,11 @@ export class IsometricBoardOverlay {
       return false;
     }
     const position = tokenPosition(token.document, this.layout, cell, source, this.env);
-    const destination = token.document.getCenterPoint({ ...source, ...position });
-    if (token.checkCollision?.(destination, { type: "move", mode: "any" })) {
+    const blocked = this.withMovementOrigin(token.document, () => token.checkCollision?.(
+      this.movementOrigin(token.document, { ...source, ...position }), {
+        origin: this.movementOrigin(token.document, source), type: "move", mode: "any"
+      }));
+    if (blocked) {
       this.env.ui?.notifications?.warn(this.text("blocked"));
       return false;
     }
@@ -1149,6 +1275,36 @@ export class IsometricBoardOverlay {
       this.moving = false;
       this.hover = null;
       this.schedule();
+    }
+  }
+
+  movementOrigin(document, position = {}) {
+    // v14 adds a dedicated movement origin with a depth-adjusted elevation.
+    const point = document.getMovementOrigin?.(position)
+      ?? { elevation: position.elevation ?? document.elevation };
+    return { ...point, ...tokenBase(document, position, this.env) };
+  }
+
+  withMovementOrigin(document, callback) {
+    if (!this.enabled || document?.parent?.id !== this.canvas.scene.id) return callback();
+    if (this.movementOrigins.has(document)) return callback();
+    // Constraining a path is synchronous in v13/v14. Replace only this
+    // document's origin for that call, including native collision pivots.
+    const method = typeof document.getMovementOrigin === "function" ? "getMovementOrigin" : "getCenterPoint";
+    const original = document[method];
+    if (typeof original !== "function") return callback();
+    const descriptor = Object.getOwnPropertyDescriptor(document, method);
+    const environment = this.env;
+    Object.defineProperty(document, method, { configurable: true, writable: true, value(data, ...args) {
+      return { ...original.call(this, data, ...args), ...tokenBase(this, data ?? {}, environment) };
+    } });
+    this.movementOrigins.add(document);
+    try {
+      return callback();
+    } finally {
+      if (descriptor) Object.defineProperty(document, method, descriptor);
+      else delete document[method];
+      this.movementOrigins.delete(document);
     }
   }
 
@@ -1244,6 +1400,10 @@ export class IsometricBoardOverlay {
     this.tiltOutput = null;
     this.rotationInput = null;
     this.rotationOutput = null;
+    this.shapeSelect = null;
+    this.topWidthControl = null;
+    this.topWidthInput = null;
+    this.topWidthOutput = null;
     this.fitButton = null;
     this.gridMoveButton = null;
     this.gridMoveHint = null;
@@ -1310,6 +1470,7 @@ export function registerIsometricBoard(environment = globalThis) {
         toggle: () => board.toggle(), moveSelected: cell => board.moveSelected(cell),
         setOpacity: (value, options) => board.setOpacity(value, options),
         setBoardSize: value => board.setBoardSize(value),
+        setGridShape: value => board.setGridShape(value), setTopWidth: value => board.setTopWidth(value),
         setTilt: value => board.setTilt(value), setRotation: value => board.setRotation(value),
         setPosition: (x, y) => board.setPosition(x, y), setGridColor: value => board.setGridColor(value),
         resetView: () => board.resetView(),
@@ -1326,6 +1487,8 @@ export function registerIsometricBoard(environment = globalThis) {
         get scaleY() { return board.scaleY; },
         get gridColor() { return board.gridColor; },
         get boardSize() { return board.boardSize; },
+        get gridShape() { return board.gridShape; },
+        get topWidth() { return board.topWidth; },
         get feetPerCell() { return board.feetPerCell; },
         get opacity() { return board.opacity; },
         get enabled() { return board.enabled; },
@@ -1339,6 +1502,12 @@ export function registerIsometricBoard(environment = globalThis) {
       prototype.getSnappedPosition = function(data) { return board.snap(this, data) ?? original.call(this, data); };
     }
     const tokenPrototype = environment.CONFIG?.Token?.objectClass?.prototype;
+    const constrainMovementPath = tokenPrototype?.constrainMovementPath;
+    if (constrainMovementPath) {
+      tokenPrototype.constrainMovementPath = function(...args) {
+        return board.withMovementOrigin(this.document, () => constrainMovementPath.apply(this, args));
+      };
+    }
     const refreshState = tokenPrototype?._refreshState;
     if (refreshState) {
       // Let Foundry compute privacy, bars, targeting and normal border state first.

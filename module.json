@@ -2,9 +2,10 @@
   "id": "mk-isometric-board",
   "title": "MK-Isometric-Board",
   "description": "An adjustable isometric encounter grid with foot-anchored tokens and movement previews for Foundry VTT.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "compatibility": {
-    "minimum": "13"
+    "minimum": "13",
+    "verified": "14"
   },
   "authors": [
     {
@@ -30,5 +31,5 @@
   "license": "https://github.com/fchrysoulas/MK-Isometric-Board/blob/main/LICENSE",
   "bugs": "https://github.com/fchrysoulas/MK-Isometric-Board/issues",
   "manifest": "https://github.com/fchrysoulas/MK-Isometric-Board/releases/latest/download/module.json",
-  "download": "https://github.com/fchrysoulas/MK-Isometric-Board/releases/download/v0.1.1/mk-isometric-board.zip"
+  "download": "https://github.com/fchrysoulas/MK-Isometric-Board/releases/download/v0.1.2/mk-isometric-board.zip"
 }

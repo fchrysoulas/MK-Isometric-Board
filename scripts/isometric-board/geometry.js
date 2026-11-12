@@ -101,10 +101,13 @@ export function readLayout(scene, rectangle, overrides) {
 }
 
 export function project(layout, column, row) {
-  const taper = layout.topWidth / 100 + (1 - layout.topWidth / 100) * row / layout.size;
+  const top = layout.topWidth / 100;
+  // Project equal floor rows in perspective: both width and depth shrink
+  // toward the narrow edge while the four outer corners stay fixed.
+  const taper = top / (top + (1 - top) * (1 - row / layout.size));
   const point = layout.gridShape === "trapezoid" ? {
     x: layout.centerX + (column - layout.size / 2) * layout.cellWidth * taper,
-    y: layout.originY + row * layout.cellHeight
+    y: layout.originY + row * layout.cellHeight * taper
   } : {
     x: layout.originX + (column - row) * layout.cellWidth / 2,
     y: layout.originY + (column + row) * layout.cellHeight / 2
@@ -129,10 +132,10 @@ export function unproject(layout, point) {
       y: layout.centerY - x * layout.sin + y * layout.cos };
   }
   if (layout.gridShape === "trapezoid") {
-    const row = (point.y - layout.originY) / layout.cellHeight;
-    const taper = layout.topWidth / 100 + (1 - layout.topWidth / 100) * row / layout.size;
+    const depth = (point.y - layout.originY) / layout.cellHeight;
+    const taper = layout.topWidth / 100 + (1 - layout.topWidth / 100) * depth / layout.size;
     if (taper <= 0) return null;
-    return { column: (point.x - layout.centerX) / (layout.cellWidth * taper) + layout.size / 2, row };
+    return { column: (point.x - layout.centerX) / (layout.cellWidth * taper) + layout.size / 2, row: depth / taper };
   }
   const x = (point.x - layout.originX) / (layout.cellWidth / 2);
   const y = (point.y - layout.originY) / (layout.cellHeight / 2);

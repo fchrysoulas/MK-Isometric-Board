@@ -243,6 +243,46 @@ test("trapezoid mode has a shorter top, a wider bottom, and safely normalized Sc
   }
 });
 
+test("trapezoid floor cells compress in width and depth toward the top with straight perspective diagonals", () => {
+  for (const boardSize of [6, 18]) for (const topWidth of [20, 50, 90]) {
+    const layout = createLayout({}, { x: 350, y: 250, width: 1800, height: 900 }, {
+      gridShape: "trapezoid", boardSize, topWidth
+    });
+    const center = boardSize / 2;
+    let previousDepth = 0;
+    let previousWidth = 0;
+    let previousRatio = 0;
+    for (let row = 0; row < boardSize; row++) {
+      const start = project(layout, center, row);
+      const end = project(layout, center, row + 1);
+      const left = project(layout, center - 0.5, row + 0.5);
+      const right = project(layout, center + 0.5, row + 0.5);
+      const depth = end.y - start.y;
+      const width = right.x - left.x;
+      assert.ok(depth > previousDepth, "nearer rows must have more visible depth");
+      assert.ok(width > previousWidth, "nearer cells must be wider");
+      assert.ok(depth / width > previousRatio, "far cells must be flatter relative to their width");
+      previousDepth = depth;
+      previousWidth = width;
+      previousRatio = depth / width;
+    }
+    const far = project(layout, 0, 0);
+    const near = project(layout, boardSize, boardSize);
+    for (let row = 1; row < boardSize; row++) {
+      const point = project(layout, row, row);
+      const cross = (point.x - far.x) * (near.y - far.y) - (point.y - far.y) * (near.x - far.x);
+      assert.ok(Math.abs(cross) < 1e-6, "a straight floor diagonal must remain straight on screen");
+    }
+    const midpoint = project(layout, center, center);
+    assert.ok(midpoint.y < layout.centerY, "the far half must occupy less screen depth than the near half");
+    const firstDepth = project(layout, center, 1).y - far.y;
+    const lastDepth = near.y - project(layout, center, boardSize - 1).y;
+    assert.ok(lastDepth > firstDepth);
+    assert.equal(cellDistance({ column: 0, row: 0 }, { column: 0, row: 1 }),
+      cellDistance({ column: 0, row: boardSize - 2 }, { column: 0, row: boardSize - 1 }));
+  }
+});
+
 test("trapezoid cells invert through tilt, rotation, taper, independent sizing and Scene padding", () => {
   const rectangle = { x: 350.25, y: 250.75, width: 5327, height: 3243 };
   for (const boardSize of [6, 18]) for (const topWidth of [20, 50, 90]) for (const tilt of [null, 5, 45, 85]) {

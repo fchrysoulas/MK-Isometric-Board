@@ -15,7 +15,7 @@
   "MK_ISOMETRIC_BOARD.isometricBoard.diamondShape": "Diamond",
   "MK_ISOMETRIC_BOARD.isometricBoard.trapezoidShape": "Trapezoid",
   "MK_ISOMETRIC_BOARD.isometricBoard.topWidth": "Top width",
-  "MK_ISOMETRIC_BOARD.isometricBoard.topWidthHint": "Set the trapezoid's top edge to 20–90% of its bottom edge. Smaller values make the grid narrow more toward the top. Saved on the Scene for everyone.",
+  "MK_ISOMETRIC_BOARD.isometricBoard.topWidthHint": "Set the trapezoid's top edge to 20–90% of its bottom edge. Smaller values compress cell width and row depth more toward the top; cells expand toward the bottom. Saved on the Scene for everyone.",
   "MK_ISOMETRIC_BOARD.isometricBoard.percentValue": "{value}%",
   "MK_ISOMETRIC_BOARD.isometricBoard.boardSizeValue": "{size} × {size}",
   "MK_ISOMETRIC_BOARD.isometricBoard.boardSizeHint": "The GM chooses 6–18 spaces per side. Fewer spaces make larger tiles. Move Grid adjusts the board's position; drag its corner handles to resize without changing the square count. Saved on the Scene for everyone.",
